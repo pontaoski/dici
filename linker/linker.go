@@ -26,13 +26,28 @@ const (
 	NotADirectory LinkError = "The passed fileInfo isn't a directory"
 )
 
-func mkdirp(path string) error {
+type errorer struct {
+	e error
+}
+
+func (e errorer) Error() error {
+	return e.e
+}
+
+func (e errorer) Call(f func() error) {
+	if e.e != nil {
+		return
+	}
+	e.e = f()
+}
+
+func mkdirp(path string) (string, error) {
 	err := os.MkdirAll(path, 0655)
-	return err
+	return path, err
 }
 
 func mount(file string, to string) error {
-	if err := mkdirp(to); err != nil {
+	if _, err := mkdirp(to); err != nil {
 		return err
 	}
 	cmd := exec.Command("mount", file, to)
@@ -45,6 +60,7 @@ func mount(file string, to string) error {
 
 func unmount(place string) error {
 	cmd := exec.Command("umount", "-l", place)
+	cmd.Env = []string{"LANGUAGE=C"}
 	if data, err := cmd.CombinedOutput(); err != nil {
 		if strings.Contains(string(data), "not mounted") {
 			return nil
@@ -66,14 +82,18 @@ func overlay(root string, lowers []string, work, upper string) error {
 		return nil
 	}
 	lowers = append([]string{root}, lowers...)
-	if err := mkdirp(work); err != nil {
+	if _, err := mkdirp(work); err != nil {
 		return err
 	}
-	if err := mkdirp(upper); err != nil {
+	if _, err := mkdirp(upper); err != nil {
 		return err
 	}
 	cmd := exec.Command("mount", "-o", fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", strings.Join(lowers, ":"), upper, work), root)
-	return cmd.Run()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to overlay: %s\n%w", string(out), err)
+	}
+	return nil
 }
 
 func checkpackage(mountDir string, p pkg.Package) (etc bool, usr bool, Var bool, opt bool, etcs string, usrs string, Vars string, opts string) {
@@ -130,8 +150,9 @@ func Unlink(mountDirectory, outDirectory string) error {
 			if err != nil {
 				return err
 			}
+			continue
 		} else if os.IsNotExist(err) {
-			return err
+			continue
 		}
 		switch {
 		case fi.IsDir():
@@ -212,7 +233,7 @@ func Link(packageDirectory, mountDirectory, outDirectory string) error {
 		}
 	}
 	for _, root := range roots {
-		if err := mkdirp(path.Join(outDirectory, root)); err != nil {
+		if _, err := mkdirp(path.Join(outDirectory, root)); err != nil {
 			return err
 		}
 	}
@@ -234,6 +255,47 @@ func Link(packageDirectory, mountDirectory, outDirectory string) error {
 		if opt {
 			optDirs = append(optDirs, opts)
 		}
+	}
+
+	etcDirWork, err := mkdirp(path.Join(mountDirectory, "etc"))
+	if err != nil {
+		return err
+	}
+	usrDirWork, err := mkdirp(path.Join(mountDirectory, "usr"))
+	if err != nil {
+		return err
+	}
+	varDirWork, err := mkdirp(path.Join(mountDirectory, "var"))
+	if err != nil {
+		return err
+	}
+	optDirWork, err := mkdirp(path.Join(mountDirectory, "opt"))
+	if err != nil {
+		return err
+	}
+	etcDirUpper, err := mkdirp(path.Join(mountDirectory, "etc-upper"))
+	if err != nil {
+		return err
+	}
+	usrDirUpper, err := mkdirp(path.Join(mountDirectory, "usr-upper"))
+	if err != nil {
+		return err
+	}
+	varDirUpper, err := mkdirp(path.Join(mountDirectory, "var-upper"))
+	if err != nil {
+		return err
+	}
+	optDirUpper, err := mkdirp(path.Join(mountDirectory, "opt-upper"))
+	if err != nil {
+		return err
+	}
+	var e errorer
+	e.Call(func() error { return overlay(path.Join(outDirectory, "etc"), etcDirs, etcDirWork, etcDirUpper) })
+	e.Call(func() error { return overlay(path.Join(outDirectory, "var"), varDirs, varDirWork, varDirUpper) })
+	e.Call(func() error { return overlay(path.Join(outDirectory, "opt"), optDirs, optDirWork, optDirUpper) })
+	e.Call(func() error { return overlay(path.Join(outDirectory, "usr"), usrDirs, usrDirWork, usrDirUpper) })
+	if e.Error() != nil {
+		return e.Error()
 	}
 	return nil
 }
